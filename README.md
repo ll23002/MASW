@@ -1,25 +1,10 @@
 # Pipeline MASW — Inversión Monte Carlo · Sitio Comalapa
 
 > Análisis multicanal de ondas superficiales (MASW) para caracterización
-> sísmica del sitio de Comalapa, El Salvador. El pipeline extrae la curva
+> sísmica. El pipeline extrae la curva
 > de dispersión de ondas Rayleigh desde registros SEG-2, aplica clustering
 > para filtrar ruido, y realiza inversión estocástica Monte Carlo con el
 > método de matriz de transferencia estabilizado (Knopoff-Dunkin).
-
----
-
-## Tabla de contenidos
-
-1. [Fundamento teórico](#1-fundamento-teórico)
-2. [Arquitectura del pipeline](#2-arquitectura-del-pipeline)
-3. [Descripción de archivos](#3-descripción-de-archivos)
-4. [Flujo paso a paso](#4-flujo-paso-a-paso)
-5. [Funciones principales](#5-funciones-principales)
-6. [Librerías científicas usadas](#6-librerías-científicas-usadas)
-7. [Modelo geológico de Comalapa](#7-modelo-geológico-de-comalapa)
-8. [Cómo ejecutar](#8-cómo-ejecutar)
-9. [Salidas](#9-salidas)
-10. [Referencias](#10-referencias)
 
 ---
 
@@ -59,116 +44,41 @@ Nyquist:
 k_Nyquist = 1 / (2 · dx)   [1/m]
 ```
 
-### 1.3 Método de la Matriz de Transferencia (Haskell-Thomson)
+### 1.3 Forward Modeling (pysurf96)
 
 Para calcular la curva de dispersión **sintética** de un modelo de capas se
-usa el método de la **matriz de transferencia de Haskell** (Thomson 1950,
-Haskell 1953). Cada capa finita `i` se describe por una matriz 4×4 `A_i` que
-relaciona los vectores de esfuerzo-desplazamiento en la parte superior e
-inferior de la capa.
+usa el modelo directo **surf96** (Computer Programs in Seismology, Herrmann).
+Se accede mediante el wrapper `pysurf96`, el cual computa las velocidades de
+fase del modo fundamental de Rayleigh usando matrices de transferencia optimizadas.
+Esta implementación es mucho más robusta y estable numéricamente que la clásica
+matriz de Haskell-Thomson a altas frecuencias, evitando problemas de overflow
+exponencial.
 
-Para `N` capas sobre un semiespacio infinito:
+### 1.4 Bayesian Evidential Learning (BEL1D)
 
-```
-Sistema global:  J = E_inv · (A_N · A_{N-1} · ... · A_1)
-Condición libre: det( J[:, 0:2] ) = 0   ← función secular
-```
+El pipeline original de Monte Carlo fue reemplazado por el framework
+**Bayesian Evidential Learning 1D (BEL1D)** (Mreyen et al., 2023, GJI).
+BEL1D es un método probabilístico que evita la inversión exhaustiva (MCMC)
+mediante aprendizaje estadístico:
 
-Los ceros de la función secular dan las velocidades de fase del modo
-fundamental de Rayleigh para cada frecuencia.
-
-### 1.4 Problema numérico: overflow exponencial
-
-La matriz de capa `A_i` contiene términos `cosh(k·h·η)` y `sinh(k·h·η)`,
-donde `η` es imaginario puro cuando `Vc < Vs`. En ese caso:
-
-```
-cosh(i·k·h·|η|) = cos(k·h·|η|)   → acotado ✓
-```
-
-Pero si `Vc ≈ Vs` o hay muchas capas a alta frecuencia, la acumulación
-numérica en el producto de matrices 4×4 produce **overflow exponencial**
-(valores ~10⁶–10¹²), generando mínimos espurios de la función secular a
-velocidades erróneas (800–1400 m/s en lugar de 100–300 m/s).
-
-**Solución:** normalizar la matriz acumulada por su norma de Frobenius después
-de cada multiplicación de capa. Esto estabiliza el cálculo sin perder la
-información de cambio de signo de la función secular.
-
-```python
-M = A_i @ M
-nrm = np.linalg.norm(M)
-if nrm > 0:
-    M /= nrm   # la escala se elimina, el SIGNO se preserva
-```
-
-### 1.5 Detección del modo fundamental por cambio de signo
-
-En lugar de buscar el mínimo de `|det(J)|` (sensible a artefactos), se evalúa
-la parte real de `det(J)` en una grilla densa de velocidades y se localiza el
-**primer cambio de signo** (menor Vc). Ese cruce corresponde al modo
-fundamental de Rayleigh. La velocidad exacta se obtiene por interpolación
-lineal:
-
-```
-Vc_modo = Vc[i] - sec[i] · (Vc[i+1] - Vc[i]) / (sec[i+1] - sec[i])
-```
-
-### 1.6 Inversión Monte Carlo
-
-La inversión estocástica sigue el esquema de **búsqueda aleatoria con
-función de costo** (Sambridge & Mosegaard 2002):
-
-```
-1. Generar N modelos aleatorios dentro de restricciones a priori
-2. Para cada modelo → calcular curva de dispersión sintética Vc_syn(f)
-3. Calcular misfit RMS relativo con la curva observada Vc_obs(f):
-
-        misfit = sqrt( mean( ((Vc_obs - Vc_syn) / Vc_obs)^2 ) )
-
-4. Seleccionar el p-percentil de mejores modelos
-5. Visualizar la distribución de Vs como mapa de calor
-```
+1. **PREBEL:** Genera un conjunto de modelos sintéticos a partir del
+   *prior geológico* (capas de Comalapa) y computa sus respuestas forward.
+2. **Reducción de Dimensionalidad:** Usa Análisis de Componentes Principales
+   (PCA) para reducir la complejidad tanto del espacio de datos (curvas)
+   como de los modelos.
+3. **Correlación Canónica (CCA):** Encuentra un subespacio donde las
+   respuestas sintéticas y los parámetros del modelo tienen correlación
+   máxima.
+4. **Estimación Bayesiana:** En este proyecto, utilizamos una variante directa:
+   generamos miles de modelos de la distribución *prior* con el forward model
+   optimizado y extraemos directamente el **Top 10%** de los que mejor se
+   ajustan a los datos de campo, construyendo empíricamente la familia
+   de perfiles probabilísticos del subsuelo.
 
 El **mapa de calor Vs vs profundidad** (estilo GJI) muestra la densidad de
 modelos aceptables ponderada por 1/misfit. Las zonas más brillantes indican
 mayor concentración de modelos compatibles con los datos → mayor certeza
 en ese rango de Vs.
-
----
-
-## 2. Arquitectura del pipeline
-
-```
-datos_sg2/*.sg2
-      │
-      ▼
-┌─────────────────┐
-│  problema3.py   │  FFT 2D sobre registros SEG-2
-│  procesar_datos │  Extrae picos de energía en espacio F-K
-│  _fk()          │  Salida: índices (archivo, fila_f, col_k)
-└────────┬────────┘
-         │  picos_indices + parámetros físicos (fs, dx, filas, columnas)
-         ▼
-┌─────────────────┐
-│  problema5.py   │  Convierte índices → (f [Hz], k [1/m])
-│  ejecutar_       │  DBSCAN en coord. cilíndricas para filtrar ruido
-│  clustering()   │  Selecciona clúster físicamente válido (Vc = f/k)
-└────────┬────────┘
-         │  curva_dispersion: {f, vc}  ← datos observados
-         ▼
-┌─────────────────┐
-│    main.py      │  1. Define restricciones geológicas (5 capas)
-│                 │  2. Genera 10,000 modelos aleatorios
-│  Problema       │  3. Calcula curva sintética (Haskell-Thomson estable)
-│  Directo +      │  4. Compara con curva observada (misfit RMS)
-│  Inversión MC   │  5. Filtra 20% mejores modelos
-└────────┬────────┘
-         │
-         ▼
-  mapa_calor_comalapa.png
-  (Vs vs profundidad + curvas de dispersión)
-```
 
 ---
 
@@ -178,10 +88,8 @@ datos_sg2/*.sg2
 |---|---|---|---|
 | `problema3.py` | Procesamiento F-K | Archivos `.sg2` | Dict con picos y parámetros físicos |
 | `problema5.py` | Clustering DBSCAN | Picos F-K (índices) | Curva de dispersión observada |
-| `main.py` | Inversión Monte Carlo | Curva observada | Mapa de calor + resumen |
-| `problema1.py` | Referencia: 1 capa + semiespacio | — | Figura de dispersión |
-| `problema2.py` | Preprocesamiento auxiliar | — | — |
-| `problema4.py` | Análisis auxiliar | — | — |
+| `main.py` | Inversión BEL1D | Curva observada | Mapa de calor + resumen |
+| `_pyBEL1D_src/` | Librería pyBEL1D | Modelo y Priors | Espacio de muestreo |
 | `datos_sg2/` | Registros sísmicos brutos | — | — |
 
 ---
@@ -220,43 +128,36 @@ Al final:
 8. Ordenar ascendente → curva de dispersión observada final
 ```
 
-### Etapa 3 — `main.py`: Generación de modelos
+### Etapa 3 — `main.py`: Pre-procesamiento de datos e Interpolación
 
 ```
-Para cada una de las 5 capas:
-  - Muestreo uniforme de espesor h en [h_min, h_max]
-  - Muestreo uniforme de Vs en [vs_min, vs_max]
-→ 10,000 modelos de 9 parámetros cada uno
-   (4 espesores + 5 velocidades Vs)
+Para adaptar el problema al framework de BEL1D:
+  1. Filtrado físico: se eliminan puntos atípicos de la curva 
+     (modos superiores) validando una dispersión decreciente monotónica.
+  2. Interpolación: La curva resultante se interpola a una grilla uniforme
+     de 20 puntos de frecuencia para asegurar suficientes dimensiones 
+     estadísticas para el Análisis de Componentes Principales (PCA).
 ```
 
-### Etapa 4 — `main.py`: Problema directo
+### Etapa 4 — `main.py`: BEL1D PREBEL y Modelo Directo (pysurf96)
 
 ```
-Para cada modelo (esp, vs, rho):
-  Para cada frecuencia f en la curva observada:
-    1. Definir grilla de velocidades Vc en (0.7·Vs1, 0.98·Vs_hs)
-    2. Para cada Vc en la grilla:
-       a. k = ω/Vc
-       b. Para cada capa finita i:
-          - Calcular ga = sqrt((Vc/Vp)²-1), gb = sqrt((Vc/Vs)²-1)
-          - Construir matriz de Haskell 4×4
-          - M = A_i @ M; normalizar M
-       c. Aplicar condición de frontera del semiespacio → J (2×4)
-       d. secular = Re(det(J[:,0:2]))
-    3. Buscar primer cambio de signo en secular(Vc) → Vc_modo
-    4. Registrar (f, Vc_modo)
+1. Construcción de pyBEL1D.MODELSET.DCVs con las capas de Comalapa.
+2. Ejecución de PREBEL paralelizada con Pathos:
+   - Extrae 3000 modelos del espacio de variables aleatorias del prior.
+   - Pysurf96 evalúa cada modelo generando su curva de dispersión Vc(f).
 ```
 
-### Etapa 5 — `main.py`: Misfit y selección
+### Etapa 5 — `main.py`: Misfit y Selección Bayesiana Directa
 
 ```
-Para cada modelo con curva sintética (f_syn, Vc_syn):
-  1. Interpolar Vc_syn en las frecuencias de f_obs
-  2. misfit = sqrt(mean(((Vc_obs - Vc_syn) / Vc_obs)²))
-  3. Guardar misfit
+Para cada modelo sintético computado por PREBEL:
+  1. misfit = sqrt(mean(((Vc_obs - Vc_syn) / Vc_obs)²))
+  2. Guardar misfit relativo de todos los 3000 modelos.
 
-Seleccionar el 20% de modelos con menor misfit (umbral percentil 20)
+Se selecciona el 10% (Top 10%) de modelos que mejor ajusten la curva
+observada empíricamente. Este subconjunto representa las zonas de alta
+probabilidad posterior del modelo bayesiano.
 Peso de cada modelo aceptable: w = 1 / (misfit + ε)
 ```
 
@@ -315,38 +216,6 @@ y se elige el primero cuya mediana de `Vc = f/k` esté en el rango sísmico
 
 ---
 
-### `main.py` — `secular_rayleigh(c, espesores, vs_arr, rhos, omega)`
-
-**Qué hace:** Evalúa la función secular de Rayleigh en una velocidad de fase
-`c` dada. Construye el producto de matrices de Haskell con normalización por
-norma de Frobenius y aplica la condición de frontera del semiespacio.
-
-**Por qué la normalización:** Cuando `Vc < Vs` (caso típico del modo
-fundamental), los términos `ga` y `gb` son imaginarios puros, lo que hace que
-`cosh(k·h·|ga|)` crezca exponencialmente con `k·h`. En modelos de 4–5 capas
-a frecuencias de 30–50 Hz esto produce overflow. La normalización mantiene la
-magnitud de `M` en O(1) mientras conserva su dirección (y por tanto el signo
-del determinante).
-
-**Retorna:** `float` — parte real del determinante de la submatriz 2×2.
-Un cero de esta función es una velocidad de fase del modo fundamental.
-
----
-
-### `main.py` — `dispersion_curve(espesores, vs_arr, rhos, f_vec)`
-
-**Qué hace:** Para cada frecuencia en `f_vec`, evalúa `secular_rayleigh` en
-una grilla de velocidades y detecta el **primer cambio de signo** (modo
-fundamental). Usa interpolación lineal para precisión subgrilla.
-
-**Grilla de búsqueda:** densa en el rango bajo `(0.7·Vs1, 2.5·Vs1)` y más
-espaciada hasta `0.98·Vs_halfspace`. Esto garantiza resolución donde vive el
-modo fundamental a alta frecuencia.
-
-**Retorna:** `(f_out, vc_out)` — arrays con la curva de dispersión sintética.
-
----
-
 ## 6. Librerías científicas usadas
 
 ### `numpy` — Álgebra lineal y aritmética vectorizada
@@ -394,21 +263,20 @@ de sismógrafos de exploración superficial) y retorna un objeto `Stream` con
 trazas sísmicas. Cada traza contiene el vector de muestras y los metadatos
 del encabezado (tasa de muestreo, número de canales, etc.).
 
-### `sklearn.cluster.DBSCAN` — Clustering de densidad
+### `pysurf96` — Forward Model optimizado
 
-DBSCAN (Density-Based Spatial Clustering of Applications with Noise) agrupa
-puntos cercanos sin requerir especificar el número de clústeres a priori.
-Puntos aislados se etiquetan como ruido (`-1`).
+Implementación vectorizada y compilada del clásico programa `surf96`
+(Hermann). Genera las curvas de dispersión teóricas del modo fundamental 
+usando rutinas en FORTRAN y C, completamente libres de overflow a altas 
+frecuencias. Funciona con matrices de transferencia.
 
-**Por qué se usa aquí:** Los picos F-K de múltiples disparos forman nubes
-en el espacio (f, k). Disparos "buenos" generan picos coherentes agrupados
-(un clúster denso = la curva de dispersión real). Disparos ruidosos o con
-artefactos producen puntos dispersos (ruido DBSCAN). El clustering permite
-separar automáticamente la señal del ruido sin umbral manual.
+### `pyBEL1D` y `scikit-learn` — Inversión Bayesiana
 
-**Parámetros críticos:**
-- `eps=15`: radio de vecindad en el espacio cilíndrico normalizado
-- `min_samples=3`: mínimo de puntos para formar un clúster
+El núcleo de la inversión se realiza con pyBEL1D, la cual se apoya 
+fuertemente en PCA y Clustering de `scikit-learn` para aprender y 
+proyectar variables geofísicas sin el costo computacional masivo del 
+tradicional Monte Carlo. En nuestro caso aplicamos una aproximación a la
+posterior truncando los resultados directos de la etapa inicial de aprendizaje.
 
 ### `matplotlib` — Visualización científica
 
@@ -447,38 +315,17 @@ según NEHRP/ASCE 7.
 
 ---
 
-## 8. Cómo ejecutar
-
-### Requisitos
-
-```bash
-# Desde el directorio del proyecto, con el venv activo:
-pip install numpy scipy matplotlib obspy scikit-learn
-```
-
-### Ejecución
-
-```bash
-# Pipeline completo (≈ 20 min con 10,000 modelos)
-python main.py
-
-# Solo extracción F-K (con gráfica de control)
-python problema3.py
-
-# Solo clustering y curva de dispersión (requiere picos_f_k.npy)
-python problema5.py
-```
 
 ### Parámetros ajustables en `main.py`
 
 | Variable | Ubicación | Descripción |
 |---|---|---|
-| `N_MODELOS` | línea ~76 | Número de modelos Monte Carlo (10,000) |
-| `umbral_pct` | línea ~243 | Percentil de modelos aceptables (20%) |
-| `CAPAS` | líneas 46–52 | Restricciones geológicas a priori |
-| `RHO` | línea ~78 | Densidades por capa (kg/m³) |
-| `NU` | línea ~79 | Razón de Poisson → ratio Vp/Vs |
-| `Z_MAX` | línea ~259 | Profundidad máxima del mapa de calor (m) |
+| `N_MODELS` | línea ~143 | Número de modelos a evaluar en BEL1D (3000) |
+| `p_threshold` | línea ~178 | Percentil top bayesiano aceptable (Top 10%) |
+| `prior` | línea ~117 | Restricciones geológicas a priori (km y km/s) |
+| `RHO_FIXED` | línea ~126 | Densidades fijadas por capa (g/cm³) |
+| `VP_FIXED` | línea ~124 | Vp derivado por Poisson de las medias de Vs |
+| `Z_MAX` | línea ~187 | Profundidad máxima del mapa de calor (m) |
 
 ### Parámetros ajustables en `problema5.py`
 
@@ -508,22 +355,6 @@ Figura de dos paneles:
 - Línea cyan con puntos: curva observada extraída de los datos reales
 - Eje X auto-escalado al rango de datos (no fijo en 0–1500 m/s)
 
-### Resumen en consola
-
-```
-==================================================
-  RESUMEN — MEJOR MODELO
-==================================================
-  Misfit RMS: 0.08800
-  C1 Suelo orgánico          Vs=XXX m/s  h=X.X m
-  C2 TBJ suelta              Vs=XXX m/s  h=X.X m
-  C3 TBJ compacta            Vs=XXX m/s  h=XX.X m
-  C4 Tobas compactadas       Vs=XXX m/s  h=XX.X m
-  C5 Basamento               Vs=XXX m/s  h=∞
-
-  Vs30 estimado: XXX m/s
-==================================================
-```
 
 ---
 
@@ -559,8 +390,4 @@ Figura de dos paneles:
   Inversión conjunta de ondas superficiales y ondas de cuerpo para
   caracterización sísmica de sitios. *Geophys. J. Int.*, 244(2), ggaf498.
 
----
 
-*Pipeline desarrollado para el análisis sísmico del sitio de Comalapa,
-El Salvador. Implementación Python con método de matriz de transferencia
-estabilizado por normalización de Frobenius.*

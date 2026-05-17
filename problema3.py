@@ -5,39 +5,64 @@ from scipy.fft import fft2, fftshift
 import glob
 import os
 
-# ==========================================
-# FUNCIÓN PRINCIPAL EXPORTABLE
-# ==========================================
 
 def procesar_datos_fk(ruta_archivos="datos_sg2/*.sg2", dx=2.0, f_max=150.0):
     """
     Procesa archivos SEG-2, aplica FFT 2D y extrae los picos de energía
-    en el espacio Frecuencia-Número de Onda (F-K).
+    en el espacio Frecuencia–Número de Onda (F–K).
 
-    Parámetros
+    Parameters
     ----------
-    ruta_archivos : str
-        Glob pattern para los archivos .sg2
-    dx : float
-        Espaciado entre geófonos en metros.
-    f_max : float
-        Frecuencia máxima de análisis en Hz.
+    ruta_archivos : str, optional
+        Patrón glob para localizar los archivos .sg2 (por defecto "datos_sg2/*.sg2").
+    dx : float, optional
+        Espaciado entre geófonos en metros (por defecto 2.0).
+    f_max : float, optional
+        Frecuencia máxima de análisis en Hz (por defecto 150.0).
 
-    Retorna
+    Returns
     -------
-    dict con:
-        'picos_indices' : np.ndarray shape (N, 3)  [indice_archivo, fila_f, col_k]
-        'frecuencias_hz': np.ndarray shape (N,)    frecuencias reales de cada pico (Hz)
-        'k_values'      : np.ndarray shape (N,)    números de onda reales de cada pico (1/m)
-        'fs'            : float                    tasa de muestreo (Hz)
-        'dx'            : float                    espaciado entre geófonos (m)
-        'filas_t'       : int                      muestras de tiempo del primer archivo
-        'columnas_e'    : int                      número de canales (geófonos)
-        'filas_150hz'   : int                      filas FFT correspondientes a f_max
-        'espectro_control': np.ndarray             espectro del primer disparo (para gráfica)
-        'fila_control'  : int                      fila del pico en espectro_control
-        'col_control'   : int                      columna del pico en espectro_control
+    dict
+        Diccionario con las siguientes claves:
+        - 'picos_indices' : numpy.ndarray, shape (N, 3)
+            Índices de los picos detectados por archivo: (indice_archivo, fila_f, col_k)
+            donde fila_f es el índice de frecuencia (fila dentro de la submatriz analizada)
+            y col_k es el índice de número de onda en la mitad positiva.
+        - 'frecuencias_hz' : numpy.ndarray, shape (N,)
+            Frecuencias reales de cada pico en Hz (mapeadas desde 0 → f_max).
+        - 'k_values' : numpy.ndarray, shape (N,)
+            Números de onda reales de cada pico en 1/m (valores de la mitad positiva del eje k).
+        - 'fs' : float
+            Tasa de muestreo (Hz) tomada del primer archivo procesado exitosamente.
+        - 'dx' : float
+            Espaciado entre geófonos (m), igual al parámetro de entrada.
+        - 'filas_t' : int
+            Número de muestras en tiempo (filas) del primer archivo procesado.
+        - 'columnas_e' : int
+            Número de canales (geófonos) del primer archivo procesado.
+        - 'filas_150hz' : int
+            Número de filas de la FFT que corresponden al rango de frecuencia 0 → f_max.
+        - 'f_max' : float
+            Frecuencia máxima usada para el mapeo (Hz).
+        - 'espectro_control' : numpy.ndarray
+            Espectro (energía) usado para la gráfica de control. Es la submatriz
+            de energía (|FFT|^2) correspondiente al primer pico válido. Shape ≈
+            (filas_150hz, n_k_pos).
+        - 'fila_control' : int or None
+            Índice de fila del pico detectado dentro de 'espectro_control' (o None si no hay).
+        - 'col_control' : int or None
+            Índice de columna del pico detectado dentro de 'espectro_control' (o None si no hay).
+        - 'archivos' : list of str
+            Lista de rutas de archivos .sg2 procesadas (ordenadas).
+
+    Notes
+    -----
+    - El código considera sólo la mitad positiva del eje de números de onda (k > 0)
+      y las frecuencias desde 0 hasta f_max.
+    - La conversión de índices a Hz y a 1/m se realiza mapeando la submatriz
+      utilizada (de tamaño 'filas_150hz' en frecuencia y n_k_pos en k) al rango físico.
     """
+
     archivos = sorted(glob.glob(ruta_archivos))
 
     if not archivos:
@@ -60,39 +85,32 @@ def procesar_datos_fk(ruta_archivos="datos_sg2/*.sg2", dx=2.0, f_max=150.0):
             fs_actual = st[0].stats.sampling_rate
 
             filas_t_actual, columnas_e_actual = matriz_sismica.shape
+
             filas_max = int(filas_t_actual * (f_max / fs_actual))
 
-            # FFT 2D + shift
+            #Calcula la transformada de Fourier 2D
             espectro_fk = fftshift(fft2(matriz_sismica))
             energia_fk = np.abs(espectro_fk) ** 2
 
-            # Tras fftshift: DC está en (filas_t//2, columnas_e//2)
+            #DC está en el centro de la matriz
             centro_f = filas_t_actual // 2
             centro_k = columnas_e_actual // 2
 
-            # Solo frecuencias positivas (0 → f_max) y k positivas (forward)
-            energia_util = energia_fk[
-                centro_f: centro_f + filas_max,
-                centro_k:                        # mitad derecha = k > 0
-            ]
+            energia_util = energia_fk[centro_f: centro_f + filas_max, centro_k:]
 
             idx_max = np.unravel_index(np.argmax(energia_util), energia_util.shape)
 
-            # Siempre inicializar parámetros físicos en el primer archivo leído
             if filas_t is None:
                 filas_t = filas_t_actual
                 columnas_e = columnas_e_actual
                 filas_150hz = filas_max
                 fs = fs_actual
 
-            # Saltar picos en col_k=0 (artefacto DC de la FFT)
             if idx_max[1] == 0:
                 continue
 
-            # col_k guardado como índice dentro de la mitad positiva
             resultados_maximos.append((i, idx_max[0], idx_max[1]))
 
-            # Actualizar espectro de control al primer pico válido (no DC)
             if len(resultados_maximos) == 1:
                 espectro_control = energia_util
                 fila_control = idx_max[0]
@@ -104,14 +122,11 @@ def procesar_datos_fk(ruta_archivos="datos_sg2/*.sg2", dx=2.0, f_max=150.0):
     if not resultados_maximos:
         raise RuntimeError("No se procesó ningún archivo SEG-2 exitosamente.")
 
-    picos_indices = np.array(resultados_maximos)  # (N, 3)
+    picos_indices = np.array(resultados_maximos)
 
-    # ── Convertir índices matriciales a unidades físicas ──────────────────────
-    # Eje de frecuencias: 0 → f_max Hz, mapeado en filas_150hz bins
     frecuencias_hz = picos_indices[:, 1] * (f_max / filas_150hz)
 
-    # Eje de números de onda: solo la mitad positiva (k > 0)
-    # El número de columnas en la mitad positiva es columnas_e - columnas_e//2
+
     k_nyquist = 1.0 / (2.0 * dx)
     n_k_pos = columnas_e - columnas_e // 2
     k_axis_pos = np.linspace(0, k_nyquist, n_k_pos)
@@ -138,18 +153,12 @@ def procesar_datos_fk(ruta_archivos="datos_sg2/*.sg2", dx=2.0, f_max=150.0):
     }
 
 
-# ==========================================
-# EJECUCIÓN STANDALONE (python problema3.py)
-# ==========================================
 if __name__ == "__main__":
     resultado = procesar_datos_fk()
 
-    # Guardar para uso externo
     np.save("picos_f_k.npy", resultado["picos_indices"])
-    print(f"[P3] Nube de puntos guardada en 'picos_f_k.npy' "
-          f"({len(resultado['picos_indices'])} picos).")
+    print("Nube de puntos guardada")
 
-    # ── Gráfica de control (primer disparo) ───────────────────────────────────
     dx = resultado["dx"]
     f_max = resultado["f_max"]
     filas_150hz = resultado["filas_150hz"]
@@ -169,7 +178,7 @@ if __name__ == "__main__":
         cmap="jet",
         origin="lower",
     )
-    # Marcar pico detectado
+
     n_k_pos = columnas_e - columnas_e // 2
     k_axis = np.linspace(0, k_limit, n_k_pos)
     f_axis = np.linspace(0, f_max, filas_150hz)
