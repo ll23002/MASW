@@ -17,9 +17,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from problema3 import procesar_datos_fk
 from problema5 import ejecutar_clustering
 
-print("=" * 60)
-print("  PIPELINE MASW — BEL1D + IPR — COMALAPA")
-print("=" * 60)
 
 print("\n[ETAPA 1] Procesando registros SEG-2...")
 res3 = procesar_datos_fk(ruta_archivos="datos_sg2/*.sg2", dx=2.0, f_max=150.0)
