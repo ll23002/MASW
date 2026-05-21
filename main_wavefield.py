@@ -17,10 +17,12 @@ from pathos import multiprocessing as mp, pools as pp
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Parámetros de procesamiento (1 a 30 Hz)
+# Parámetros de procesamiento
 DX = 2.0  # metros
 F_MIN = 0.1
 F_MAX = 30.0
+DT = 0.002  # paso de tiempo en segundos
+N_SAMPLES = 8192  # 8192 muestras * 0.002s = 16.38s (permite resolver f < 0.1 Hz)
 
 def cps_forward_wavefield(model):
     """
@@ -49,12 +51,12 @@ def cps_forward_wavefield(model):
             for i in range(nLayer):
                 f.write(f"{h_full[i]:.4f} {vp[i]:.4f} {vs[i]:.4f} {rho[i]:.4f} {qp[i]:.1f} {qs[i]:.1f} 0 0 1 1\n")
         
-        # Archivo de distancias para 24 geofonos. 512 muestras a 0.002s (1.024s)
+        # Archivo de distancias para 24 geofonos.
         dfile = os.path.join(tmpdir, "dfile")
         with open(dfile, "w") as f:
             for i in range(1, 25):
                 dist = (i * DX) / 1000.0
-                f.write(f"{dist} 0.002 512 0.0 0.0\n")
+                f.write(f"{dist} {DT} {N_SAMPLES} 0.0 0.0\n")
         
         # CPS binaries (Modal summation for Rayleigh waves)
         subprocess.run([os.path.join(CPS_BIN, "sprep96"), "-M", "model.mod", "-d", "dfile", "-R", "-FMIN", str(F_MIN), "-FMAX", str(F_MAX)], cwd=tmpdir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -73,7 +75,7 @@ def cps_forward_wavefield(model):
         # Si por alguna razon falla la generacion o no hay ondas
         if not z_files or len(z_files) != 24:
             # Random large values to prevent variance=0 causing NaN in PCA
-            return np.random.rand(24 * 512) * 1e9
+            return np.random.rand(24 * N_SAMPLES) * 1e9
             
         traces = []
         for zf in z_files:
@@ -83,11 +85,11 @@ def cps_forward_wavefield(model):
                 tr.filter("bandpass", freqmin=F_MIN, freqmax=F_MAX, corners=4, zerophase=True)
             except Exception:
                 pass
-            # Aseguramos que tengan 512 puntos
+            # Aseguramos que tengan N_SAMPLES puntos
             d = tr.data
             d = np.nan_to_num(d, nan=0.0)
-            if len(d) > 512: d = d[:512]
-            elif len(d) < 512: d = np.pad(d, (0, 512 - len(d)))
+            if len(d) > N_SAMPLES: d = d[:N_SAMPLES]
+            elif len(d) < N_SAMPLES: d = np.pad(d, (0, N_SAMPLES - len(d)))
             # Normalizar la traza para comparar forma de onda
             max_val = np.max(np.abs(d))
             if max_val > 0: d = d / max_val
@@ -97,8 +99,8 @@ def cps_forward_wavefield(model):
 
 def procesar_campo_real(ruta_archivos):
     """
-    Lee los sg2, hace downsampling a 500 Hz (dt=0.002) y recorta a 512 muestras.
-    Retorna vector aplanado de 24x512.
+    Lee los sg2, hace downsampling y recorta a N_SAMPLES muestras.
+    Retorna vector aplanado de 24 x N_SAMPLES.
     """
     archivos = sorted(glob.glob(ruta_archivos))
     if not archivos:
@@ -107,13 +109,13 @@ def procesar_campo_real(ruta_archivos):
     # Tomaremos el primer archivo para el ejemplo
     st = read(archivos[0])
     st.filter("bandpass", freqmin=F_MIN, freqmax=F_MAX, corners=4, zerophase=True)
-    st.resample(500.0) # dt = 0.002
+    st.resample(1.0 / DT)
     
     traces = []
     for tr in st[:24]:
         d = tr.data
-        if len(d) > 512: d = d[:512]
-        elif len(d) < 512: d = np.pad(d, (0, 512 - len(d)))
+        if len(d) > N_SAMPLES: d = d[:N_SAMPLES]
+        elif len(d) < N_SAMPLES: d = np.pad(d, (0, N_SAMPLES - len(d)))
         
         # Mute antes de la llegada de onda? Para simpleza solo normalizamos
         max_val = np.max(np.abs(d))
@@ -169,7 +171,7 @@ def ejecutar_inversion_wavefield():
                   "DataUnits": "Amplitude", "DataName": "Wavefield", "DataAxis": "Time [s]"}
 
     # Time vector (solo referencial)
-    Timing = np.linspace(0, 1.024, 512 * 24)
+    Timing = np.linspace(0, N_SAMPLES * DT, N_SAMPLES * 24)
 
     print("[ETAPA 2] Configurando BEL1D MODELSET...")
     ModelSet = BEL1D.MODELSET(prior=ListPrior, cond=cond, method="Wavefield", 
@@ -190,7 +192,7 @@ def ejecutar_inversion_wavefield():
     
     # RMSE calculations
     # Error: RMSE between real Dataset and synthetic
-    # sampDC has shape (N_MODELS, 24*512)
+    # sampDC has shape (N_MODELS, 24*N_SAMPLES)
     rmse = np.sqrt(np.nanmean(((Dataset - sampDC)) ** 2, axis=1))
     finite_mask = np.isfinite(rmse)
     rmse_ok = rmse[finite_mask]
@@ -205,8 +207,8 @@ def ejecutar_inversion_wavefield():
     
     idx_mejor = np.argmin(rmse_top)
     mejor_modelo = samp_top[idx_mejor]
-    mejor_forward = sampDC_top[idx_mejor].reshape(24, 512)
-    datos_reales = Dataset.reshape(24, 512)
+    mejor_forward = sampDC_top[idx_mejor].reshape(24, N_SAMPLES)
+    datos_reales = Dataset.reshape(24, N_SAMPLES)
     
     print(f"[INFO] RMSE Mejor modelo: {rmse_top[idx_mejor]:.4f}")
     
@@ -227,7 +229,7 @@ def ejecutar_inversion_wavefield():
     for ax in axes: ax.set_facecolor("#0d1117")
     
     dist_grid = np.arange(1, 25) * DX
-    time_grid = np.arange(512) * 0.002
+    time_grid = np.arange(N_SAMPLES) * DT
     
     # a) Real
     ax = axes[0]
@@ -258,8 +260,8 @@ def ejecutar_inversion_wavefield():
     for i in range(N_LAYER-1):
         model_anelastic[5*N_LAYER-1 + i] = 5  # Qs bajo
         
-    fwd_el = cps_forward_wavefield(model_elastic).reshape(24, 512)
-    fwd_anel = cps_forward_wavefield(model_anelastic).reshape(24, 512)
+    fwd_el = cps_forward_wavefield(model_elastic).reshape(24, N_SAMPLES)
+    fwd_anel = cps_forward_wavefield(model_anelastic).reshape(24, N_SAMPLES)
     
     ax = axes[2]
     for i in range(24):
