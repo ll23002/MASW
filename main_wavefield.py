@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from obspy import read
 import glob
+from scipy import stats
 
 warnings.filterwarnings("ignore")
 
@@ -112,7 +113,6 @@ def cps_forward_wavefield(model):
             if len(d) > N_SAMPLES: d = d[:N_SAMPLES]
             elif len(d) < N_SAMPLES: d = np.pad(d, (0, N_SAMPLES - len(d)))
 
-            # Normalizar la traza para comparar forma de onda
             max_val = np.max(np.abs(d))
             if max_val > 0: d = d / max_val
             traces.append(d)
@@ -122,15 +122,11 @@ def cps_forward_wavefield(model):
 
 
 def procesar_campo_real(ruta_archivos):
-    """
-    Lee los sg2, hace downsampling y recorta a N_SAMPLES muestras.
-    Retorna vector aplanado de 24 x N_SAMPLES.
-    """
     archivos = sorted(glob.glob(ruta_archivos))
     if not archivos:
         raise FileNotFoundError(f"No se encontraron archivos en {ruta_archivos}")
     
-    # Tomaremos el primer archivo para el ejemplo
+    # No es suficiente solo tomar el primer archivo
     st = read(archivos[0])
     st.filter("bandpass", freqmin=F_MIN, freqmax=F_MAX, corners=4, zerophase=True)
     st.resample(1.0 / DT)
@@ -140,8 +136,7 @@ def procesar_campo_real(ruta_archivos):
         d = tr.data
         if len(d) > N_SAMPLES: d = d[:N_SAMPLES]
         elif len(d) < N_SAMPLES: d = np.pad(d, (0, N_SAMPLES - len(d)))
-        
-        # Mute antes de la llegada de onda? Para simpleza solo normalizamos
+
         max_val = np.max(np.abs(d))
         if max_val > 0: d = d / max_val
         traces.append(d)
@@ -150,6 +145,32 @@ def procesar_campo_real(ruta_archivos):
 
 
 def ejecutar_inversion_wavefield():
+    """Ejecuta la inversión del campo de ondas y genera comparativas gráficas.
+
+    La función carga los datos reales `.sg2`, configura un `BEL1D.MODELSET`
+    con priors uniformes para el modelo 1-D, genera modelos sintéticos con
+    `PREBEL`, calcula el RMSE entre observaciones y sintéticos, selecciona el
+    mejor ajuste y construye una figura comparativa entre el dato real, el
+    sintético ganador y un caso elástico frente a uno anelástico.
+
+    No recibe argumentos y produce efectos secundarios importantes: lee
+    archivos desde `datos_sg2/`, ejecuta binarios externos de CPS a través de
+    `cps_forward_wavefield()`, guarda la figura `wavefields_comparativa.png`
+    y muestra la gráfica en pantalla.
+
+    Returns:
+        None: Esta función solo ejecuta el flujo completo de inversión y
+        visualización.
+
+    Raises:
+        FileNotFoundError: Si no se encuentran archivos `.sg2` en
+            `datos_sg2/`.
+        ValueError: Si no hay modelos o resultados válidos para calcular el
+            RMSE o seleccionar el mejor ajuste.
+        RuntimeError: Si fallan dependencias externas como CPS, ObsPy o
+            `pyBEL1D` durante la generación de datos sintéticos o la lectura
+            de archivos.
+    """
     print("[ETAPA 1] Leyendo datos reales (campo de ondas)...")
     Dataset = procesar_campo_real("datos_sg2/*.sg2")
     
@@ -168,7 +189,7 @@ def ejecutar_inversion_wavefield():
     ])
     N_LAYER = len(prior_matrix)
     
-    from scipy import stats
+
     ListPrior = []
     NamesFull = ["Thickness", "Vs", "Vp", "Rho", "Qp", "Qs"]
     Units = [" [km]", " [km/s]", " [km/s]", " [g/cc]", "", ""]
@@ -178,7 +199,7 @@ def ejecutar_inversion_wavefield():
 
     for j in range(6):
         for i in range(N_LAYER):
-            if (i == N_LAYER - 1) and (j == 0): continue # h del semiespacio es infinito
+            if (i == N_LAYER - 1) and (j == 0): continue
             cmin = prior_matrix[i, j*2]
             cmax = prior_matrix[i, j*2+1]
             ListPrior.append(stats.uniform(loc=cmin, scale=cmax - cmin))
@@ -187,48 +208,59 @@ def ejecutar_inversion_wavefield():
             NamesFU.append(f"{NamesFull[j]} {i+1}{Units[j]}")
 
     def cond(model):
+        """Comprueba que un modelo respete los límites de los priors.
+
+        Args:
+            model: Vector unidimensional con los parámetros del modelo a
+                validar. Debe seguir el mismo orden usado para construir
+                `ListPrior`.
+
+        Returns:
+            bool: `True` si todos los valores de `model` están dentro de los
+            rangos mínimos y máximos definidos; `False` en caso contrario.
+        """
         return (np.logical_and(np.greater_equal(model, Mins), np.less_equal(model, Maxs))).all()
 
-    # Como DataName y DataAxis podemos usar Time
     paramNames = {"NamesFU": NamesFU, "NamesSU": NamesFU, "NamesS": NamesFU, 
                   "NamesGlobal": NamesFull, "NamesGlobalS": NamesFull, 
                   "DataUnits": "Amplitude", "DataName": "Wavefield", "DataAxis": "Time [s]"}
 
-    # Time vector (solo referencial)
     Timing = np.linspace(0, N_SAMPLES * DT, N_SAMPLES * 24)
 
     print("[ETAPA 2] Configurando BEL1D MODELSET...")
-    ModelSet = BEL1D.MODELSET(prior=ListPrior, cond=cond, method="Wavefield", 
+    # Configura cómo se representan los modelos y cómo se calculan los sintéticos para la inversión
+    ModelSet = BEL1D.MODELSET(prior=ListPrior, cond=cond, method="Wavefield",
                               forwardFun={"Fun": cps_forward_wavefield, "Axis": Timing}, 
                               paramNames=paramNames, nbLayer=N_LAYER, logTransform=[False, False])
+
                               
     print("[ETAPA 3] Corriendo BEL1D (Simulaciones Iniciales)...")
-    N_MODELS = 500  # Reducido para que termine pronto
+    N_MODELS = 500
     pool = pp.ProcessPool(mp.cpu_count())
     Prebel = BEL1D.PREBEL(ModelSet, nbModels=N_MODELS)
     Prebel.run(Parallelization=[True, pool], verbose=True)
     pool.terminate()
 
-    samples = Prebel.MODELS
-    sampDC = Prebel.FORWARD
+    samples = Prebel.MODELS # Modelos de parámetros sísmicos
+    sampDC = Prebel.FORWARD # Campos de ondas sintéticos
 
     print(f"\n[INFO] Modelos sintéticos generados: {samples.shape[0]}")
-    
-    # RMSE calculations
-    # Error: RMSE between real Dataset and synthetic
-    # sampDC has shape (N_MODELS, 24*N_SAMPLES)
+
+    #Elimina resultados invalidos
     rmse = np.sqrt(np.nanmean(((Dataset - sampDC)) ** 2, axis=1))
     finite_mask = np.isfinite(rmse)
     rmse_ok = rmse[finite_mask]
     samp_ok = samples[finite_mask]
     sampDC_ok = sampDC[finite_mask]
-    
+
+    #Se queda con el 10% de casos con menor RMSE
     p_threshold = np.percentile(rmse_ok, 10)
     top_mask = rmse_ok <= p_threshold
     rmse_top = rmse_ok[top_mask]
     samp_top = samp_ok[top_mask]
     sampDC_top = sampDC_ok[top_mask]
-    
+
+    # Selecciona el modelo con menor RMSE
     idx_mejor = np.argmin(rmse_top)
     mejor_modelo = samp_top[idx_mejor]
     mejor_forward = sampDC_top[idx_mejor].reshape(24, N_SAMPLES)
@@ -275,14 +307,12 @@ def ejecutar_inversion_wavefield():
     ax.set_xlabel("Distancia (m)", color="white")
     
     # c) Superposición Q elástico vs anelástico
-    # Creamos dos modelos de prueba basados en el mejor
     model_elastic = mejor_modelo.copy()
-    model_elastic[4*N_LAYER-1:6*N_LAYER-1] = 5000  # Q muy alto = elástico
+    model_elastic[4*N_LAYER-1:6*N_LAYER-1] = 5000  # Q alto = elástico
     
     model_anelastic = mejor_modelo.copy()
-    # Forzar un Qs bajo (ej 5) en los estratos superiores
     for i in range(N_LAYER-1):
-        model_anelastic[5*N_LAYER-1 + i] = 5  # Qs bajo
+        model_anelastic[5*N_LAYER-1 + i] = 5  # Qs bajo = anelástico
         
     fwd_el = cps_forward_wavefield(model_elastic).reshape(24, N_SAMPLES)
     fwd_anel = cps_forward_wavefield(model_anelastic).reshape(24, N_SAMPLES)
