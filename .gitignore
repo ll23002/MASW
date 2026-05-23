@@ -36,3 +36,7 @@ htmlcov/
 # OS specific
 .DS_Store
 Thumbs.db
+
+# Ignore PNG image files
+*.png
+*.PNG
