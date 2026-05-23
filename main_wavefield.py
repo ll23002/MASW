@@ -1,7 +1,6 @@
 import sys, os, warnings, tempfile, subprocess
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 from obspy import read
 import glob
 
@@ -17,18 +16,44 @@ from pathos import multiprocessing as mp, pools as pp
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Parámetros de procesamiento
-DX = 2.0  # metros
+DX = 2.0
 F_MIN = 0.1
 F_MAX = 30.0
-DT = 0.002  # paso de tiempo en segundos
-N_SAMPLES = 8192  # 8192 muestras * 0.002s = 16.38s (permite resolver f < 0.1 Hz)
+DT = 0.002 # 500Hz
+N_SAMPLES = 8192  # 8192 * 0.002s = 16.384s, df = 1/T = 1/16.384 = 0.061 Hz
 
 def cps_forward_wavefield(model):
-    """
-    Simula wavefields usando CPS (Modal Summation).
-    model = vector 1D con h, Vs, Vp, Rho, Qp, Qs
-    Retorna vector aplanado de los sismogramas.
+    """Calcula el campo de ondas sintético a partir de un modelo 1-D.
+
+    La función escribe archivos temporales para CPS, ejecuta los binarios
+    `sprep96`, `sdisp96`, `sregn96`, `spulse96` y `f96tosac`, y luego lee los
+    trazos SAC generados para construir un vector aplanado de amplitud
+    normalizada.
+
+    El vector `model` debe contener los parámetros del subsuelo en este orden:
+    espesores, velocidades de onda S (`Vs`), velocidades de onda P (`Vp`),
+    densidades (`rho`), factores de calidad de P (`Qp`) y factores de calidad
+    de S (`Qs`). Para `nLayer` capas, la longitud esperada es `6 * nLayer - 1`
+    porque la capa inferior corresponde a un semiespacio y no tiene espesor.
+
+    Args:
+        model: Vector unidimensional con los parámetros del modelo en el orden
+            descrito arriba. Las unidades esperadas son kilómetros para
+            espesores, km/s para velocidades, g/cc para densidad y valores
+            adimensionales para `Qp` y `Qs`.
+
+    Returns:
+        numpy.ndarray: Vector unidimensional de longitud `24 * N_SAMPLES` con
+        las 24 trazas horizontales aplanadas y normalizadas por su amplitud
+        máxima absoluta.
+
+    Notes:
+        - Si la generación de archivos SAC falla o no se obtienen las 24
+          trazas esperadas, la función devuelve un vector aleatorio grande para
+          evitar varianza cero y problemas numéricos posteriores.
+        - La función depende de la ruta definida en `CPS_BIN` y de la
+          disponibilidad de los ejecutables de CPS en ese directorio.
+
     """
     nLayer = (len(model) + 1) // 6
     h = model[0:nLayer-1]
@@ -41,7 +66,6 @@ def cps_forward_wavefield(model):
     # Halfspace
     h_full = np.append(h, 0.0)
 
-    # El directorio temporal previene colisiones durante multiprocesamiento
     with tempfile.TemporaryDirectory() as tmpdir:
         mod_file = os.path.join(tmpdir, "model.mod")
         with open(mod_file, "w") as f:
@@ -51,11 +75,11 @@ def cps_forward_wavefield(model):
             for i in range(nLayer):
                 f.write(f"{h_full[i]:.4f} {vp[i]:.4f} {vs[i]:.4f} {rho[i]:.4f} {qp[i]:.1f} {qs[i]:.1f} 0 0 1 1\n")
         
-        # Archivo de distancias para 24 geofonos.
+        # Por que se asume 24 geofonos en todo el código?
         dfile = os.path.join(tmpdir, "dfile")
         with open(dfile, "w") as f:
             for i in range(1, 25):
-                dist = (i * DX) / 1000.0
+                dist = (i * DX) / 1000.0 #km
                 f.write(f"{dist} {DT} {N_SAMPLES} 0.0 0.0\n")
         
         # CPS binaries (Modal summation for Rayleigh waves)
@@ -68,34 +92,34 @@ def cps_forward_wavefield(model):
             subprocess.run([os.path.join(CPS_BIN, "spulse96"), "-d", "dfile", "-V", "-p", "-l", "2"], cwd=tmpdir, stdout=f, stderr=subprocess.DEVNULL)
         
         subprocess.run([os.path.join(CPS_BIN, "f96tosac"), "-B", "pulse.out"], cwd=tmpdir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
-        # Read SAC files. .ZVF indicates Vertical Velocity for Fundamental/All modes
+
+
         z_files = sorted(glob.glob(os.path.join(tmpdir, "*ZVF.sac")))
-        
-        # Si por alguna razon falla la generacion o no hay ondas
+
         if not z_files or len(z_files) != 24:
-            # Random large values to prevent variance=0 causing NaN in PCA
             return np.random.rand(24 * N_SAMPLES) * 1e9
             
         traces = []
         for zf in z_files:
             tr = read(zf)[0]
-            # Bandpass
             try:
                 tr.filter("bandpass", freqmin=F_MIN, freqmax=F_MAX, corners=4, zerophase=True)
             except Exception:
                 pass
-            # Aseguramos que tengan N_SAMPLES puntos
+
             d = tr.data
             d = np.nan_to_num(d, nan=0.0)
             if len(d) > N_SAMPLES: d = d[:N_SAMPLES]
             elif len(d) < N_SAMPLES: d = np.pad(d, (0, N_SAMPLES - len(d)))
+
             # Normalizar la traza para comparar forma de onda
             max_val = np.max(np.abs(d))
             if max_val > 0: d = d / max_val
             traces.append(d)
             
         return np.array(traces).flatten()
+
+
 
 def procesar_campo_real(ruta_archivos):
     """
