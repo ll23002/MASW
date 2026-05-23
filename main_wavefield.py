@@ -17,16 +17,61 @@ from pathos import multiprocessing as mp, pools as pp
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Parámetros de procesamiento
-DX = 2.0  # metros
+DX = 2.0
 F_MIN = 0.1
 F_MAX = 30.0
-DT = 0.002  # paso de tiempo en segundos
-N_SAMPLES = 8192  # 8192 muestras * 0.002s = 16.38s (permite resolver f < 0.1 Hz)
-N_TRACES = 24  # Valor por defecto, se actualizará dinámicamente
+DT = 0.002
+N_SAMPLES = 8192  # 8192 muestras * 0.002s = 16.38s, 1/16.38 = 0.061s
+N_TRACES = 24
 
 def cps_forward_wavefield(model):
-    """Calcula el campo de ondas sintético a partir de un modelo 1-D."""
+    """Simula el campo de ondas sísmico para un modelo 1D estratificado usando CPS.
+    
+    Esta función genera sismogramas sintéticos ejecutando los programas de modelado 
+    directo de CPS (Computer Programs in Seismology). Toma un modelo 1D parametrizado 
+    y calcula el movimiento del terreno vertical (componente Z) en ubicaciones de 
+    receptores especificadas utilizando métodos espectrales.
+    
+    El parámetro model se analiza internamente para extraer propiedades específicas 
+    de cada capa: espesor (h), velocidad de ondas S (Vs), velocidad de ondas P (Vp), 
+    densidad (rho), factor de calidad de ondas P (Qp) y factor de calidad de ondas S (Qs).
+    
+    El flujo de trabajo incluye:
+    1. Creación del archivo de modelo de velocidad en formato CPS
+    2. Ejecución de cálculos de desplazamiento (sdisp96)
+    3. Cálculo de sismogramas sintéticos (sregn96)
+    4. Generación de sismogramas de componente vertical (spulse96)
+    5. Conversión de salida a formato SAC (f96tosac)
+    6. Filtrado y normalización de las trazas
+    
+    Args:
+        model (numpy.ndarray): Array aplanado de forma (6*N_CAPA - 1,) que contiene
+            los parámetros del modelo en el orden: 
+            [h_1, ..., h_N-1, Vs_1, ..., Vs_N, Vp_1, ..., Vp_N, 
+             rho_1, ..., rho_N, Qp_1, ..., Qp_N, Qs_1, ..., Qs_N]
+            donde N es el número de capas (se infiere automáticamente de la longitud).
+            Unidades: h [km], Vs [km/s], Vp [km/s], rho [g/cc].
+            La última capa (semiespacio) tiene espesor infinito (h=0.0).
+    
+    Returns:
+        numpy.ndarray: Array 1D aplanado de forma (N_TRACES * N_SAMPLES,) que contiene
+            el movimiento del terreno vertical normalizado (componente Z) para todas 
+            las trazas. Cada traza está filtrada pasa-banda y normalizada en amplitud.
+            Retorna un array de ruido aleatorio si la generación de archivos SAC falla.
+    
+    Raises:
+        No se lanzan excepciones explícitas. Las fallas en las llamadas a subprocesos 
+        o en la generación de archivos resultan en una salida de ruido aleatorio como 
+        alternativa.
+    
+    Note:
+        - Requiere binarios de CPS en la ruta especificada por la variable global CPS_BIN
+        - Utiliza parámetros globales: DX, F_MIN, F_MAX, DT, N_SAMPLES, N_TRACES
+        - Todos los cálculos ocurren en un directorio temporal
+        - Filtro pasa-banda aplicado: [F_MIN, F_MAX] Hz con 4 esquinas, fase cero
+        - Cada traza se normaliza por su amplitud máxima absoluta
+    """
+    
     nLayer = (len(model) + 1) // 6
     h = model[0:nLayer-1]
     vs = model[nLayer-1:2*nLayer-1]
@@ -87,10 +132,45 @@ def cps_forward_wavefield(model):
         return np.array(traces).flatten()
 
 def procesar_un_campo_real(archivo_sg2):
+    """Procesa un archivo de datos sísmicos reales en formato SG2.
+    
+    Esta función lee un archivo de datos sísmicos reales en formato SG2, aplica filtrado 
+    pasa-banda, remuestreo y normalización para preparar los datos para su inversión. 
+    Los datos procesados se extraen hasta el número de trazas especificado (N_TRACES) 
+    y se normalizan por su amplitud máxima.
+    
+    El flujo de procesamiento incluye:
+    1. Lectura del archivo SG2 usando ObsPy
+    2. Aplicación de filtro pasa-banda [F_MIN, F_MAX] Hz
+    3. Remuestreo a la tasa de muestreo DT especificada
+    4. Truncamiento/padding a exactamente N_SAMPLES muestras por traza
+    5. Normalización de cada traza por su amplitud máxima absoluta
+    
+    Args:
+        archivo_sg2 (str): Ruta del archivo SG2 a procesar. Debe ser un archivo 
+            válido en formato SG2 (formato de datos sísmicos de Reftek).
+    
+    Returns:
+        numpy.ndarray: Array 1D aplanado de forma (N_TRACES * N_SAMPLES,) que contiene
+            los datos sísmicos procesados y normalizados del componente vertical Z.
+            Si hay más trazas en el archivo, solo se utilizan las primeras N_TRACES.
+            Cada traza está normalizada por su amplitud máxima absoluta.
+    
+    Raises:
+        FileNotFoundError: Si el archivo SG2 no existe o no es accesible.
+        Exception: Cualquier excepción de lectura de datos o procesamiento con ObsPy 
+            será propagada.
+    
+    Note:
+        - Requiere que el archivo SG2 sea leíble por ObsPy
+        - Utiliza parámetros globales: F_MIN, F_MAX, DT, N_SAMPLES, N_TRACES
+        - Solo procesa las primeras N_TRACES trazas del archivo (si hay más)
+        - Filtro pasa-banda: [F_MIN, F_MAX] Hz con 4 esquinas, fase cero
+        - Si una traza tiene amplitud nula, no se normaliza (permanece en ceros)
+        - El array de retorno tiene dimensión (N_TRACES * N_SAMPLES,)
+    
     """
-    Lee un único sg2, hace downsampling y recorta a N_SAMPLES muestras.
-    Retorna vector aplanado de N_TRACES x N_SAMPLES.
-    """
+
     st = read(archivo_sg2)
     st.filter("bandpass", freqmin=F_MIN, freqmax=F_MAX, corners=4, zerophase=True)
     st.resample(1.0 / DT)
@@ -119,12 +199,13 @@ def ejecutar_inversion_wavefield():
     N_TRACES = len(st_test)
     print(f"[INFO] Se detectaron dinámicamente {N_TRACES} trazas (geófonos) en los archivos .sg2")
 
+    # H_min, H_max, Vs_min, Vs_max, Vp_min, Vp_max, Rho_min, Rho_max, Qp_min, Qp_max, Qs_min, Qs_max
     prior_matrix = np.array([
-        [0.0005, 0.003, 0.100, 0.300, 0.300, 0.600, 1.4, 1.6, 20, 100, 5, 30],
-        [0.002,  0.010, 0.150, 0.350, 0.400, 0.800, 1.6, 1.8, 20, 100, 5, 40],
-        [0.005,  0.015, 0.300, 0.550, 0.800, 1.200, 1.8, 2.0, 30, 150, 10, 60],
-        [0.010,  0.020, 0.500, 0.900, 1.200, 1.800, 2.0, 2.2, 50, 200, 20, 100],
-        [0.000,  0.000, 0.800, 1.500, 1.800, 3.000, 2.2, 2.5, 80, 300, 30, 150],
+        [0.0005, 0.003, 0.100, 0.300, 0.300, 0.600, 1.4, 1.6, 20, 100, 5, 30],      # Capa 1 (superficial)
+        [0.002,  0.010, 0.150, 0.350, 0.400, 0.800, 1.6, 1.8, 20, 100, 5, 40],      # Capa 2
+        [0.005,  0.015, 0.300, 0.550, 0.800, 1.200, 1.8, 2.0, 30, 150, 10, 60],     # Capa 3
+        [0.010,  0.020, 0.500, 0.900, 1.200, 1.800, 2.0, 2.2, 50, 200, 20, 100],    # Capa 4
+        [0.000,  0.000, 0.800, 1.500, 1.800, 3.000, 2.2, 2.5, 80, 300, 30, 150],    # Semiespacio (halfspace, H=0)
     ])
     N_LAYER = len(prior_matrix)
     
@@ -160,7 +241,6 @@ def ejecutar_inversion_wavefield():
                               paramNames=paramNames, nbLayer=N_LAYER, logTransform=[False, False])
 
     print("\n[ETAPA 3] Corriendo PREBEL (Simulaciones Iniciales Prior)...")
-    print("         (Esta operación masiva se ejecuta UNA SOLA VEZ para toda la línea 2D)")
     N_MODELS = 500
     pool = pp.ProcessPool(mp.cpu_count())
     Prebel = BEL1D.PREBEL(ModelSet, nbModels=N_MODELS)
@@ -176,19 +256,17 @@ def ejecutar_inversion_wavefield():
     for idx, archivo in enumerate(archivos):
         print(f"\n[INFO] Procesando disparo: {os.path.basename(archivo)} ({idx+1}/{len(archivos)})...")
         Dataset = procesar_un_campo_real(archivo)
-        
-        # Omitimos ruido para no sobrecargar el modelo en wavefields pesados
+
         Postbel = BEL1D.POSTBEL(Prebel)
         Postbel.run(Dataset=Dataset, nbSamples=500, NoiseModel=None) 
-        
-        # Extraer modelo medio (mean model)
+
         mean_model = np.mean(Postbel.SAMPLES, axis=0)
         nLayer_model = (len(mean_model) + 1) // 6
         h = mean_model[0:nLayer_model-1]
         vs = mean_model[nLayer_model-1:2*nLayer_model-1]
         
         if idx == 0:
-            print("       -> Generando gráficas CCA, Posterior y Wiggle para el primer disparo...")
+            print("Generando gráficas CCA, Posterior y Wiggle para el primer disparo...")
             try:
                 Postbel.ShowDataset()
                 fig_cca = plt.gcf()
@@ -199,12 +277,11 @@ def ejecutar_inversion_wavefield():
                 fig_post = plt.gcf()
                 fig_post.savefig("etapa4_posterior.png", dpi=150)
                 plt.close(fig_post)
-                print("       -> Archivos 'etapa4_cca.png' y 'etapa4_posterior.png' guardados.")
+                print("Archivos 'etapa4_cca.png' y 'etapa4_posterior.png' guardados.")
             except Exception as e:
                 print(f"[WARNING] Falló la generación de gráficas CCA/Posterior de la Etapa 4: {e}")
                 
             try:
-                # Wiggle plot comparativa
                 fig_comp, axes = plt.subplots(1, 3, figsize=(18, 8))
                 fig_comp.patch.set_facecolor("#0d1117")
                 for ax in axes: ax.set_facecolor("#0d1117")
@@ -263,7 +340,7 @@ def ejecutar_inversion_wavefield():
                 fig_comp.tight_layout()
                 fig_comp.savefig("wavefields_comparativa.png", dpi=150, facecolor=fig_comp.get_facecolor())
                 plt.close(fig_comp)
-                print("       -> Archivo 'wavefields_comparativa.png' guardado.")
+                print("-> Archivo 'wavefields_comparativa.png' guardado.")
             except Exception as e:
                 print(f"[WARNING] Falló la comparativa wiggle plot: {e}")
         
@@ -272,19 +349,17 @@ def ejecutar_inversion_wavefield():
 
     print("\n[ETAPA 5] Generando Perfil 2D Final...")
     fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # Eje X: shot number (1 to N)
+
     x = np.arange(1, len(archivos) + 1)
-    
-    # Promedio de profundidades para el eje Y
+
     mean_h = np.mean(modelos_profundidad, axis=0)
     z_interfaces = np.zeros(N_LAYER)
     for i in range(N_LAYER - 1):
         z_interfaces[i+1] = z_interfaces[i] + mean_h[i]
         
     z_grid = list(z_interfaces)
-    z_grid.append(z_interfaces[-1] + 0.020) # 20m más para el semiespacio
-    z_grid = np.array(z_grid) * 1000 # a metros
+    z_grid.append(z_interfaces[-1] + 0.020)
+    z_grid = np.array(z_grid) * 1000
     
     V = np.array(perfil_2d).T
     
