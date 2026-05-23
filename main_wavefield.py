@@ -17,45 +17,16 @@ from pathos import multiprocessing as mp, pools as pp
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-DX = 2.0
+# Parámetros de procesamiento
+DX = 2.0  # metros
 F_MIN = 0.1
 F_MAX = 30.0
-DT = 0.002 # 500Hz
-N_SAMPLES = 8192  # 8192 * 0.002s = 16.384s, df = 1/T = 1/16.384 = 0.061 Hz
+DT = 0.002  # paso de tiempo en segundos
+N_SAMPLES = 8192  # 8192 muestras * 0.002s = 16.38s (permite resolver f < 0.1 Hz)
+N_TRACES = 24  # Valor por defecto, se actualizará dinámicamente
 
 def cps_forward_wavefield(model):
-    """Calcula el campo de ondas sintético a partir de un modelo 1-D.
-
-    La función escribe archivos temporales para CPS, ejecuta los binarios
-    `sprep96`, `sdisp96`, `sregn96`, `spulse96` y `f96tosac`, y luego lee los
-    trazos SAC generados para construir un vector aplanado de amplitud
-    normalizada.
-
-    El vector `model` debe contener los parámetros del subsuelo en este orden:
-    espesores, velocidades de onda S (`Vs`), velocidades de onda P (`Vp`),
-    densidades (`rho`), factores de calidad de P (`Qp`) y factores de calidad
-    de S (`Qs`). Para `nLayer` capas, la longitud esperada es `6 * nLayer - 1`
-    porque la capa inferior corresponde a un semiespacio y no tiene espesor.
-
-    Args:
-        model: Vector unidimensional con los parámetros del modelo en el orden
-            descrito arriba. Las unidades esperadas son kilómetros para
-            espesores, km/s para velocidades, g/cc para densidad y valores
-            adimensionales para `Qp` y `Qs`.
-
-    Returns:
-        numpy.ndarray: Vector unidimensional de longitud `24 * N_SAMPLES` con
-        las 24 trazas horizontales aplanadas y normalizadas por su amplitud
-        máxima absoluta.
-
-    Notes:
-        - Si la generación de archivos SAC falla o no se obtienen las 24
-          trazas esperadas, la función devuelve un vector aleatorio grande para
-          evitar varianza cero y problemas numéricos posteriores.
-        - La función depende de la ruta definida en `CPS_BIN` y de la
-          disponibilidad de los ejecutables de CPS en ese directorio.
-
-    """
+    """Calcula el campo de ondas sintético a partir de un modelo 1-D."""
     nLayer = (len(model) + 1) // 6
     h = model[0:nLayer-1]
     vs = model[nLayer-1:2*nLayer-1]
@@ -64,7 +35,6 @@ def cps_forward_wavefield(model):
     qp = model[4*nLayer-1:5*nLayer-1]
     qs = model[5*nLayer-1:6*nLayer-1]
 
-    # Halfspace
     h_full = np.append(h, 0.0)
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -76,14 +46,12 @@ def cps_forward_wavefield(model):
             for i in range(nLayer):
                 f.write(f"{h_full[i]:.4f} {vp[i]:.4f} {vs[i]:.4f} {rho[i]:.4f} {qp[i]:.1f} {qs[i]:.1f} 0 0 1 1\n")
         
-        # Por que se asume 24 geofonos en todo el código?
         dfile = os.path.join(tmpdir, "dfile")
         with open(dfile, "w") as f:
-            for i in range(1, 25):
-                dist = (i * DX) / 1000.0 #km
+            for i in range(1, N_TRACES + 1):
+                dist = (i * DX) / 1000.0
                 f.write(f"{dist} {DT} {N_SAMPLES} 0.0 0.0\n")
         
-        # CPS binaries (Modal summation for Rayleigh waves)
         subprocess.run([os.path.join(CPS_BIN, "sprep96"), "-M", "model.mod", "-d", "dfile", "-R", "-FMIN", str(F_MIN), "-FMAX", str(F_MAX)], cwd=tmpdir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run([os.path.join(CPS_BIN, "sdisp96")], cwd=tmpdir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run([os.path.join(CPS_BIN, "sregn96")], cwd=tmpdir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -94,11 +62,10 @@ def cps_forward_wavefield(model):
         
         subprocess.run([os.path.join(CPS_BIN, "f96tosac"), "-B", "pulse.out"], cwd=tmpdir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-
         z_files = sorted(glob.glob(os.path.join(tmpdir, "*ZVF.sac")))
 
-        if not z_files or len(z_files) != 24:
-            return np.random.rand(24 * N_SAMPLES) * 1e9
+        if not z_files or len(z_files) != N_TRACES:
+            return np.random.rand(N_TRACES * N_SAMPLES) * 1e9
             
         traces = []
         for zf in z_files:
@@ -119,20 +86,17 @@ def cps_forward_wavefield(model):
             
         return np.array(traces).flatten()
 
-
-
-def procesar_campo_real(ruta_archivos):
-    archivos = sorted(glob.glob(ruta_archivos))
-    if not archivos:
-        raise FileNotFoundError(f"No se encontraron archivos en {ruta_archivos}")
-    
-    # No es suficiente solo tomar el primer archivo
-    st = read(archivos[0])
+def procesar_un_campo_real(archivo_sg2):
+    """
+    Lee un único sg2, hace downsampling y recorta a N_SAMPLES muestras.
+    Retorna vector aplanado de N_TRACES x N_SAMPLES.
+    """
+    st = read(archivo_sg2)
     st.filter("bandpass", freqmin=F_MIN, freqmax=F_MAX, corners=4, zerophase=True)
     st.resample(1.0 / DT)
     
     traces = []
-    for tr in st[:24]:
+    for tr in st[:N_TRACES]:
         d = tr.data
         if len(d) > N_SAMPLES: d = d[:N_SAMPLES]
         elif len(d) < N_SAMPLES: d = np.pad(d, (0, N_SAMPLES - len(d)))
@@ -143,44 +107,19 @@ def procesar_campo_real(ruta_archivos):
         
     return np.array(traces).flatten()
 
-
 def ejecutar_inversion_wavefield():
-    """Ejecuta la inversión del campo de ondas y genera comparativas gráficas.
-
-    La función carga los datos reales `.sg2`, configura un `BEL1D.MODELSET`
-    con priors uniformes para el modelo 1-D, genera modelos sintéticos con
-    `PREBEL`, calcula el RMSE entre observaciones y sintéticos, selecciona el
-    mejor ajuste y construye una figura comparativa entre el dato real, el
-    sintético ganador y un caso elástico frente a uno anelástico.
-
-    No recibe argumentos y produce efectos secundarios importantes: lee
-    archivos desde `datos_sg2/`, ejecuta binarios externos de CPS a través de
-    `cps_forward_wavefield()`, guarda la figura `wavefields_comparativa.png`
-    y muestra la gráfica en pantalla.
-
-    Returns:
-        None: Esta función solo ejecuta el flujo completo de inversión y
-        visualización.
-
-    Raises:
-        FileNotFoundError: Si no se encuentran archivos `.sg2` en
-            `datos_sg2/`.
-        ValueError: Si no hay modelos o resultados válidos para calcular el
-            RMSE o seleccionar el mejor ajuste.
-        RuntimeError: Si fallan dependencias externas como CPS, ObsPy o
-            `pyBEL1D` durante la generación de datos sintéticos o la lectura
-            de archivos.
-    """
-    print("[ETAPA 1] Leyendo datos reales (campo de ondas)...")
-    Dataset = procesar_campo_real("datos_sg2/*.sg2")
+    global N_TRACES
+    print("[ETAPA 1] Leyendo metadata de datos reales...")
+    archivos = sorted(glob.glob("datos_sg2/*.sg2"))
+    if not archivos:
+        raise FileNotFoundError("No se encontraron archivos en datos_sg2/")
     
-    print("[INFO] Vector de datos reales (aplanado):", Dataset.shape)
+    # Detectar el número de trazas dinámicamente usando el primer archivo
+    st_test = read(archivos[0])
+    N_TRACES = len(st_test)
+    print(f"[INFO] Se detectaron dinámicamente {N_TRACES} trazas (geófonos) en los archivos .sg2")
 
-    # 5 capas (4 finitas + 1 semiespacio)
-    # RANGOS (prior): h(km), Vs(km/s), Vp(km/s), Rho(g/cc), Qp, Qs
-    # Ahora Vp, Qp y Qs están libres.
     prior_matrix = np.array([
-        #  h_min, h_max, Vs_min, Vs_max, Vp_min, Vp_max, Rho_min, Rho_max, Qp_min, Qp_max, Qs_min, Qs_max
         [0.0005, 0.003, 0.100, 0.300, 0.300, 0.600, 1.4, 1.6, 20, 100, 5, 30],
         [0.002,  0.010, 0.150, 0.350, 0.400, 0.800, 1.6, 1.8, 20, 100, 5, 40],
         [0.005,  0.015, 0.300, 0.550, 0.800, 1.200, 1.8, 2.0, 30, 150, 10, 60],
@@ -189,7 +128,6 @@ def ejecutar_inversion_wavefield():
     ])
     N_LAYER = len(prior_matrix)
     
-
     ListPrior = []
     NamesFull = ["Thickness", "Vs", "Vp", "Rho", "Qp", "Qs"]
     Units = [" [km]", " [km/s]", " [km/s]", " [g/cc]", "", ""]
@@ -208,132 +146,161 @@ def ejecutar_inversion_wavefield():
             NamesFU.append(f"{NamesFull[j]} {i+1}{Units[j]}")
 
     def cond(model):
-        """Comprueba que un modelo respete los límites de los priors.
-
-        Args:
-            model: Vector unidimensional con los parámetros del modelo a
-                validar. Debe seguir el mismo orden usado para construir
-                `ListPrior`.
-
-        Returns:
-            bool: `True` si todos los valores de `model` están dentro de los
-            rangos mínimos y máximos definidos; `False` en caso contrario.
-        """
         return (np.logical_and(np.greater_equal(model, Mins), np.less_equal(model, Maxs))).all()
 
     paramNames = {"NamesFU": NamesFU, "NamesSU": NamesFU, "NamesS": NamesFU, 
                   "NamesGlobal": NamesFull, "NamesGlobalS": NamesFull, 
                   "DataUnits": "Amplitude", "DataName": "Wavefield", "DataAxis": "Time [s]"}
 
-    Timing = np.linspace(0, N_SAMPLES * DT, N_SAMPLES * 24)
+    Timing = np.linspace(0, N_SAMPLES * DT, N_SAMPLES * N_TRACES)
 
-    print("[ETAPA 2] Configurando BEL1D MODELSET...")
-    # Configura cómo se representan los modelos y cómo se calculan los sintéticos para la inversión
+    print("\n[ETAPA 2] Configurando BEL1D MODELSET...")
     ModelSet = BEL1D.MODELSET(prior=ListPrior, cond=cond, method="Wavefield",
                               forwardFun={"Fun": cps_forward_wavefield, "Axis": Timing}, 
                               paramNames=paramNames, nbLayer=N_LAYER, logTransform=[False, False])
 
-                              
-    print("[ETAPA 3] Corriendo BEL1D (Simulaciones Iniciales)...")
+    print("\n[ETAPA 3] Corriendo PREBEL (Simulaciones Iniciales Prior)...")
+    print("         (Esta operación masiva se ejecuta UNA SOLA VEZ para toda la línea 2D)")
     N_MODELS = 500
     pool = pp.ProcessPool(mp.cpu_count())
     Prebel = BEL1D.PREBEL(ModelSet, nbModels=N_MODELS)
     Prebel.run(Parallelization=[True, pool], verbose=True)
     pool.terminate()
 
-    samples = Prebel.MODELS # Modelos de parámetros sísmicos
-    sampDC = Prebel.FORWARD # Campos de ondas sintéticos
+    print(f"\n[INFO] Modelos sintéticos (Prior) generados: {Prebel.MODELS.shape[0]}")
 
-    print(f"\n[INFO] Modelos sintéticos generados: {samples.shape[0]}")
+    perfil_2d = []
+    modelos_profundidad = []
 
-    #Elimina resultados invalidos
-    rmse = np.sqrt(np.nanmean(((Dataset - sampDC)) ** 2, axis=1))
-    finite_mask = np.isfinite(rmse)
-    rmse_ok = rmse[finite_mask]
-    samp_ok = samples[finite_mask]
-    sampDC_ok = sampDC[finite_mask]
-
-    #Se queda con el 10% de casos con menor RMSE
-    p_threshold = np.percentile(rmse_ok, 10)
-    top_mask = rmse_ok <= p_threshold
-    rmse_top = rmse_ok[top_mask]
-    samp_top = samp_ok[top_mask]
-    sampDC_top = sampDC_ok[top_mask]
-
-    # Selecciona el modelo con menor RMSE
-    idx_mejor = np.argmin(rmse_top)
-    mejor_modelo = samp_top[idx_mejor]
-    mejor_forward = sampDC_top[idx_mejor].reshape(24, N_SAMPLES)
-    datos_reales = Dataset.reshape(24, N_SAMPLES)
-    
-    print(f"[INFO] RMSE Mejor modelo: {rmse_top[idx_mejor]:.4f}")
-    
-    print("[ETAPA 4] Generando Gráficas CCA (Mreyen & Eppinger)...")
-    # Genera los CCA de pyBEL1D, esto toma Dataset internamente
-    # Para la inversión completa con Dataset:
-    # Postbel = BEL1D.POSTBEL(Prebel)
-    # Postbel.run(Dataset=Dataset)
-    # fig_cca = Postbel.ShowDataset() ...
-    
-    # Para no complicar con la clase Postbel y el ruido, mostraremos simplemente la sensibilidad 
-    # visualizando el Wiggle plot y las simulaciones con Q variable
-    
-    print("[ETAPA 5] Simulaciones Anelásticas comparativas y Wiggle Plots...")
-    
-    fig, axes = plt.subplots(1, 3, figsize=(18, 8))
-    fig.patch.set_facecolor("#0d1117")
-    for ax in axes: ax.set_facecolor("#0d1117")
-    
-    dist_grid = np.arange(1, 25) * DX
-    time_grid = np.arange(N_SAMPLES) * DT
-    
-    # a) Real
-    ax = axes[0]
-    for i in range(24):
-        ax.plot(datos_reales[i, :] + dist_grid[i], time_grid, color="#00e5ff", lw=1)
-        ax.fill_betweenx(time_grid, dist_grid[i], datos_reales[i, :] + dist_grid[i], where=(datos_reales[i, :]>0), color="#00e5ff", alpha=0.5)
-    ax.invert_yaxis()
-    ax.set_title("Datos Reales (.sg2)\n(Wiggle Plot)", color="white")
-    ax.set_ylabel("Tiempo (s)", color="white")
-    ax.set_xlabel("Distancia (m)", color="white")
-    
-    # b) Sintético Ganador
-    ax = axes[1]
-    for i in range(24):
-        ax.plot(mejor_forward[i, :] + dist_grid[i], time_grid, color="#76ff03", lw=1)
-        ax.fill_betweenx(time_grid, dist_grid[i], mejor_forward[i, :] + dist_grid[i], where=(mejor_forward[i, :]>0), color="#76ff03", alpha=0.5)
-    ax.invert_yaxis()
-    ax.set_title("Sintético: Mejor Modelo posterior", color="white")
-    ax.set_xlabel("Distancia (m)", color="white")
-    
-    # c) Superposición Q elástico vs anelástico
-    model_elastic = mejor_modelo.copy()
-    model_elastic[4*N_LAYER-1:6*N_LAYER-1] = 5000  # Q alto = elástico
-    
-    model_anelastic = mejor_modelo.copy()
-    for i in range(N_LAYER-1):
-        model_anelastic[5*N_LAYER-1 + i] = 5  # Qs bajo = anelástico
+    print("\n[ETAPA 4] Iniciando iteración POSTBEL sobre los archivos (Perfil 2D)...")
+    for idx, archivo in enumerate(archivos):
+        print(f"\n[INFO] Procesando disparo: {os.path.basename(archivo)} ({idx+1}/{len(archivos)})...")
+        Dataset = procesar_un_campo_real(archivo)
         
-    fwd_el = cps_forward_wavefield(model_elastic).reshape(24, N_SAMPLES)
-    fwd_anel = cps_forward_wavefield(model_anelastic).reshape(24, N_SAMPLES)
-    
-    ax = axes[2]
-    for i in range(24):
-        ax.plot(fwd_el[i, :] + dist_grid[i], time_grid, color="white", lw=1.5, label="Elástico (Q=5000)" if i==0 else "")
-        ax.plot(fwd_anel[i, :] + dist_grid[i], time_grid, color="#ff3d00", lw=1.5, ls="--", label="Anelástico (Qs=5)" if i==0 else "")
-    ax.invert_yaxis()
-    ax.set_title("Efecto de Q (Elástico vs Anelástico)", color="white")
-    ax.set_xlabel("Distancia (m)", color="white")
-    ax.legend(facecolor="#1a1a2e", labelcolor="white", fontsize=9, framealpha=0.8)
-    
-    for ax in axes:
-        ax.tick_params(colors="white")
-        ax.spines[:].set_color("#444")
-        ax.grid(True, color="#333", lw=0.3, alpha=0.4)
+        # Omitimos ruido para no sobrecargar el modelo en wavefields pesados
+        Postbel = BEL1D.POSTBEL(Prebel)
+        Postbel.run(Dataset=Dataset, nbSamples=500, NoiseModel=None) 
         
-    plt.tight_layout()
-    out_fig = "wavefields_comparativa.png"
-    plt.savefig(out_fig, dpi=150, facecolor=fig.get_facecolor())
+        # Extraer modelo medio (mean model)
+        mean_model = np.mean(Postbel.SAMPLES, axis=0)
+        nLayer_model = (len(mean_model) + 1) // 6
+        h = mean_model[0:nLayer_model-1]
+        vs = mean_model[nLayer_model-1:2*nLayer_model-1]
+        
+        if idx == 0:
+            print("       -> Generando gráficas CCA, Posterior y Wiggle para el primer disparo...")
+            try:
+                Postbel.ShowDataset()
+                fig_cca = plt.gcf()
+                fig_cca.savefig("etapa4_cca.png", dpi=150)
+                plt.close(fig_cca)
+                
+                Postbel.ShowPost()
+                fig_post = plt.gcf()
+                fig_post.savefig("etapa4_posterior.png", dpi=150)
+                plt.close(fig_post)
+                print("       -> Archivos 'etapa4_cca.png' y 'etapa4_posterior.png' guardados.")
+            except Exception as e:
+                print(f"[WARNING] Falló la generación de gráficas CCA/Posterior de la Etapa 4: {e}")
+                
+            try:
+                # Wiggle plot comparativa
+                fig_comp, axes = plt.subplots(1, 3, figsize=(18, 8))
+                fig_comp.patch.set_facecolor("#0d1117")
+                for ax in axes: ax.set_facecolor("#0d1117")
+                
+                dist_grid = np.arange(1, N_TRACES + 1) * DX
+                time_grid = np.arange(N_SAMPLES) * DT
+                datos_reales = Dataset.reshape(N_TRACES, N_SAMPLES)
+                mejor_forward = cps_forward_wavefield(mean_model).reshape(N_TRACES, N_SAMPLES)
+                
+                # a) Real
+                ax = axes[0]
+                for i in range(N_TRACES):
+                    ax.plot(datos_reales[i, :] + dist_grid[i], time_grid, color="#00e5ff", lw=1)
+                    ax.fill_betweenx(time_grid, dist_grid[i], datos_reales[i, :] + dist_grid[i], where=(datos_reales[i, :]>0), color="#00e5ff", alpha=0.5)
+                ax.invert_yaxis()
+                ax.set_ylim(1.5, 0)
+                ax.set_title("Datos Reales (.sg2)\n(Wiggle Plot)", color="white")
+                ax.set_ylabel("Tiempo (s)", color="white")
+                ax.set_xlabel("Distancia (m)", color="white")
+                
+                # b) Sintético
+                ax = axes[1]
+                for i in range(N_TRACES):
+                    ax.plot(mejor_forward[i, :] + dist_grid[i], time_grid, color="#76ff03", lw=1)
+                    ax.fill_betweenx(time_grid, dist_grid[i], mejor_forward[i, :] + dist_grid[i], where=(mejor_forward[i, :]>0), color="#76ff03", alpha=0.5)
+                ax.invert_yaxis()
+                ax.set_ylim(1.5, 0)
+                ax.set_title("Sintético: Mean Model Posterior", color="white")
+                ax.set_xlabel("Distancia (m)", color="white")
+                
+                # c) Efecto Q
+                model_elastic = mean_model.copy()
+                model_elastic[4*nLayer_model-1:6*nLayer_model-1] = 5000
+                model_anelastic = mean_model.copy()
+                for i in range(nLayer_model-1):
+                    model_anelastic[5*nLayer_model-1 + i] = 5
+                
+                fwd_el = cps_forward_wavefield(model_elastic).reshape(N_TRACES, N_SAMPLES)
+                fwd_anel = cps_forward_wavefield(model_anelastic).reshape(N_TRACES, N_SAMPLES)
+                
+                ax = axes[2]
+                for i in range(N_TRACES):
+                    ax.plot(fwd_el[i, :] + dist_grid[i], time_grid, color="white", lw=1.5, label="Elástico (Q=5000)" if i==0 else "")
+                    ax.plot(fwd_anel[i, :] + dist_grid[i], time_grid, color="#ff3d00", lw=1.5, ls="--", label="Anelástico (Qs=5)" if i==0 else "")
+                ax.invert_yaxis()
+                ax.set_ylim(1.5, 0)
+                ax.set_title("Efecto de Q (Elástico vs Anelástico)", color="white")
+                ax.set_xlabel("Distancia (m)", color="white")
+                ax.legend(facecolor="#1a1a2e", labelcolor="white", fontsize=9, framealpha=0.8)
+                
+                for ax in axes:
+                    ax.tick_params(colors="white")
+                    ax.spines[:].set_color("#444")
+                    ax.grid(True, color="#333", lw=0.3, alpha=0.4)
+                    
+                fig_comp.tight_layout()
+                fig_comp.savefig("wavefields_comparativa.png", dpi=150, facecolor=fig_comp.get_facecolor())
+                plt.close(fig_comp)
+                print("       -> Archivo 'wavefields_comparativa.png' guardado.")
+            except Exception as e:
+                print(f"[WARNING] Falló la comparativa wiggle plot: {e}")
+        
+        perfil_2d.append(vs)
+        modelos_profundidad.append(h)
+
+    print("\n[ETAPA 5] Generando Perfil 2D Final...")
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Eje X: shot number (1 to N)
+    x = np.arange(1, len(archivos) + 1)
+    
+    # Promedio de profundidades para el eje Y
+    mean_h = np.mean(modelos_profundidad, axis=0)
+    z_interfaces = np.zeros(N_LAYER)
+    for i in range(N_LAYER - 1):
+        z_interfaces[i+1] = z_interfaces[i] + mean_h[i]
+        
+    z_grid = list(z_interfaces)
+    z_grid.append(z_interfaces[-1] + 0.020) # 20m más para el semiespacio
+    z_grid = np.array(z_grid) * 1000 # a metros
+    
+    V = np.array(perfil_2d).T
+    
+    X, Z = np.meshgrid(np.append(x, x[-1]+1) - 0.5, z_grid)
+    
+    mesh = ax.pcolormesh(X, Z, V * 1000, cmap="jet", shading="flat")
+    ax.invert_yaxis()
+    ax.set_title("Perfil 2D de Onda de Corte (Vs) - MASW Wavefield Inversion")
+    ax.set_ylabel("Profundidad (m)")
+    ax.set_xlabel("Número de Disparo (Shot)")
+    cbar = fig.colorbar(mesh, ax=ax)
+    cbar.set_label("Velocidad Vs (m/s)")
+    
+    fig.tight_layout()
+    out_fig = "perfil_2d_Vs.png"
+    fig.savefig(out_fig, dpi=150)
     print(f"\n[LISTO] Figura guardada en: {out_fig}")
     plt.show()
 
