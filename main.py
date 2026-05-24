@@ -26,16 +26,16 @@ N_TRACES = 24
 
 def cps_forward_wavefield(model):
     """Simula el campo de ondas sísmico para un modelo 1D estratificado usando CPS.
-    
-    Esta función genera sismogramas sintéticos ejecutando los programas de modelado 
-    directo de CPS (Computer Programs in Seismology). Toma un modelo 1D parametrizado 
-    y calcula el movimiento del terreno vertical (componente Z) en ubicaciones de 
+
+    Esta función genera sismogramas sintéticos ejecutando los programas de modelado
+    directo de CPS (Computer Programs in Seismology). Toma un modelo 1D parametrizado
+    y calcula el movimiento del terreno vertical (componente Z) en ubicaciones de
     receptores especificadas utilizando métodos espectrales.
-    
-    El parámetro model se analiza internamente para extraer propiedades específicas 
-    de cada capa: espesor (h), velocidad de ondas S (Vs), velocidad de ondas P (Vp), 
+
+    El parámetro model se analiza internamente para extraer propiedades específicas
+    de cada capa: espesor (h), velocidad de ondas S (Vs), velocidad de ondas P (Vp),
     densidad (rho), factor de calidad de ondas P (Qp) y factor de calidad de ondas S (Qs).
-    
+
     El flujo de trabajo incluye:
     1. Creación del archivo de modelo de velocidad en formato CPS
     2. Ejecución de cálculos de desplazamiento (sdisp96)
@@ -43,33 +43,26 @@ def cps_forward_wavefield(model):
     4. Generación de sismogramas de componente vertical (spulse96)
     5. Conversión de salida a formato SAC (f96tosac)
     6. Filtrado y normalización de las trazas
-    
+
     Args:
         model (numpy.ndarray): Array aplanado de forma (6*N_CAPA - 1,) que contiene
-            los parámetros del modelo en el orden: 
-            [h_1, ..., h_N-1, Vs_1, ..., Vs_N, Vp_1, ..., Vp_N, 
+            los parámetros del modelo en el orden:
+            [h_1, ..., h_N-1, Vs_1, ..., Vs_N, Vp_1, ..., Vp_N,
              rho_1, ..., rho_N, Qp_1, ..., Qp_N, Qs_1, ..., Qs_N]
             donde N es el número de capas (se infiere automáticamente de la longitud).
             Unidades: h [km], Vs [km/s], Vp [km/s], rho [g/cc].
             La última capa (semiespacio) tiene espesor infinito (h=0.0).
-    
+
     Returns:
         numpy.ndarray: Array 1D aplanado de forma (N_TRACES * N_SAMPLES,) que contiene
-            el movimiento del terreno vertical normalizado (componente Z) para todas 
+            el movimiento del terreno vertical normalizado (componente Z) para todas
             las trazas. Cada traza está filtrada pasa-banda y normalizada en amplitud.
             Retorna un array de ruido aleatorio si la generación de archivos SAC falla.
-    
+
     Raises:
-        No se lanzan excepciones explícitas. Las fallas en las llamadas a subprocesos 
-        o en la generación de archivos resultan en una salida de ruido aleatorio como 
+        No se lanzan excepciones explícitas. Las fallas en las llamadas a subprocesos
+        o en la generación de archivos resultan en una salida de ruido aleatorio como
         alternativa.
-    
-    Note:
-        - Requiere binarios de CPS en la ruta especificada por la variable global CPS_BIN
-        - Utiliza parámetros globales: DX, F_MIN, F_MAX, DT, N_SAMPLES, N_TRACES
-        - Todos los cálculos ocurren en un directorio temporal
-        - Filtro pasa-banda aplicado: [F_MIN, F_MAX] Hz con 4 esquinas, fase cero
-        - Cada traza se normaliza por su amplitud máxima absoluta
     """
     
     nLayer = (len(model) + 1) // 6
@@ -133,42 +126,32 @@ def cps_forward_wavefield(model):
 
 def procesar_un_campo_real(archivo_sg2):
     """Procesa un archivo de datos sísmicos reales en formato SG2.
-    
-    Esta función lee un archivo de datos sísmicos reales en formato SG2, aplica filtrado 
-    pasa-banda, remuestreo y normalización para preparar los datos para su inversión. 
-    Los datos procesados se extraen hasta el número de trazas especificado (N_TRACES) 
+
+    Esta función lee un archivo de datos sísmicos reales en formato SG2, aplica filtrado
+    pasa-banda, remuestreo y normalización para preparar los datos para su inversión.
+    Los datos procesados se extraen hasta el número de trazas especificado (N_TRACES)
     y se normalizan por su amplitud máxima.
-    
+
     El flujo de procesamiento incluye:
     1. Lectura del archivo SG2 usando ObsPy
     2. Aplicación de filtro pasa-banda [F_MIN, F_MAX] Hz
     3. Remuestreo a la tasa de muestreo DT especificada
     4. Truncamiento/padding a exactamente N_SAMPLES muestras por traza
     5. Normalización de cada traza por su amplitud máxima absoluta
-    
+
     Args:
-        archivo_sg2 (str): Ruta del archivo SG2 a procesar. Debe ser un archivo 
-            válido en formato SG2 (formato de datos sísmicos de Reftek).
-    
+        archivo_sg2 (str): Ruta del archivo SG2 a procesar. Debe ser un archivo
+            válido en formato SG2.
+
     Returns:
         numpy.ndarray: Array 1D aplanado de forma (N_TRACES * N_SAMPLES,) que contiene
             los datos sísmicos procesados y normalizados del componente vertical Z.
-            Si hay más trazas en el archivo, solo se utilizan las primeras N_TRACES.
             Cada traza está normalizada por su amplitud máxima absoluta.
-    
+
     Raises:
         FileNotFoundError: Si el archivo SG2 no existe o no es accesible.
-        Exception: Cualquier excepción de lectura de datos o procesamiento con ObsPy 
+        Exception: Cualquier excepción de lectura de datos o procesamiento con ObsPy
             será propagada.
-    
-    Note:
-        - Requiere que el archivo SG2 sea leíble por ObsPy
-        - Utiliza parámetros globales: F_MIN, F_MAX, DT, N_SAMPLES, N_TRACES
-        - Solo procesa las primeras N_TRACES trazas del archivo (si hay más)
-        - Filtro pasa-banda: [F_MIN, F_MAX] Hz con 4 esquinas, fase cero
-        - Si una traza tiene amplitud nula, no se normaliza (permanece en ceros)
-        - El array de retorno tiene dimensión (N_TRACES * N_SAMPLES,)
-    
     """
 
     st = read(archivo_sg2)
@@ -227,6 +210,24 @@ def ejecutar_inversion_wavefield():
             NamesFU.append(f"{NamesFull[j]} {i+1}{Units[j]}")
 
     def cond(model):
+        """Valida que los parámetros del modelo se encuentren dentro de los límites especificados.
+
+        Esta función comprueba que todos los parámetros del modelo 1D (espesores de capas,
+        velocidades de onda, densidad y factores de calidad) se encuentren dentro de los
+        rangos permitidos definidos por las matrices Mins y Maxs. Se utiliza como función
+        de restricción condicional durante la inversión probabilística en el framework BEL1D.
+
+        Args:
+            model (numpy.ndarray): Array 1D aplanado que contiene los parámetros del modelo
+                en el orden [h_1, ..., h_N-1, Vs_1, ..., Vs_N, Vp_1, ..., Vp_N,
+                rho_1, ..., rho_N, Qp_1, ..., Qp_N, Qs_1, ..., Qs_N], donde N es el número
+                de capas estratificadas.
+
+        Returns:
+            bool: Retorna True si TODOS los parámetros del modelo se encuentran dentro de
+                los límites [Mins[i], Maxs[i]] para cada parámetro i. Retorna False si
+                al menos un parámetro viola sus límites de restricción.
+        """
         return (np.logical_and(np.greater_equal(model, Mins), np.less_equal(model, Maxs))).all()
 
     paramNames = {"NamesFU": NamesFU, "NamesSU": NamesFU, "NamesS": NamesFU, 
