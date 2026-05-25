@@ -2,7 +2,8 @@ import sys, os, warnings
 
 warnings.filterwarnings("ignore")
 
-CPS_BIN = "/home/alexander/CPS/PROGRAMS.330/bin/"
+#CPS_BIN = "/home/alexander/CPS/PROGRAMS.330/bin/"
+CPS_BIN = os.environ.get("CPS_BIN", "/home/alexander/CPS/PROGRAMS.330/bin/")
 BEL1D_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_pyBEL1D_src")
 if BEL1D_PATH not in sys.path:
     sys.path.insert(0, BEL1D_PATH)
