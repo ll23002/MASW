@@ -1,23 +1,12 @@
-"""
-Etapa 4 - Inversión Estocástica y Cálculo de RMSE
-==================================================
-Ejecuta la exploración del espacio de búsqueda mediante PREBEL (generando al menos
-500 modelos sintéticos con multiprocesamiento), calcula el RMSE entre el dataset
-real y cada simulación sintética, e imprime el modelo con menor RMSE.
-
-Para cada archivo SG2, ejecuta también POSTBEL y genera las gráficas CCA/Posterior.
-Retorna el perfil 2D de Vs y las profundidades de interfaz por disparo.
-"""
-
 import os
 import numpy as np
 import matplotlib.pyplot as plt
 
 from pathos import multiprocessing as mp, pools as pp
 
-from config import DT, N_SAMPLES, N_TRACES, DX
+from config import N_SAMPLES, N_TRACES
 from etapa1 import procesar_un_campo_real
-from etapa2 import cps_forward_wavefield
+from pyBEL1D import BEL1D
 
 
 def correr_prebel(model_set, n_models=500):
@@ -30,7 +19,6 @@ def correr_prebel(model_set, n_models=500):
     Returns:
         BEL1D.PREBEL: Objeto Prebel con los modelos y forwards generados.
     """
-    from pyBEL1D import BEL1D
 
     pool = pp.ProcessPool(mp.cpu_count())
     Prebel = BEL1D.PREBEL(model_set, nbModels=n_models)

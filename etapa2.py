@@ -1,16 +1,7 @@
-"""
-Etapa 2 - Forward Modeling Automático con CPS
-=============================================
-Simula la propagación de ondas en la tierra dados los parámetros del subsuelo.
-Recibe un vector de propiedades del suelo y retorna el sismograma sintético como
-vector plano (N_TRACES * N_SAMPLES,).
-"""
-
 import os, tempfile, subprocess
 import numpy as np
 import glob
 from obspy import read
-
 from config import CPS_BIN, DX, F_MIN, F_MAX, DT, N_SAMPLES, N_TRACES
 
 
@@ -48,11 +39,6 @@ def cps_forward_wavefield(model):
             el movimiento del terreno vertical normalizado (componente Z) para todas
             las trazas. Cada traza está filtrada pasa-banda y normalizada en amplitud.
             Retorna un array de ruido aleatorio si la generación de archivos SAC falla.
-
-    Raises:
-        No se lanzan excepciones explícitas. Las fallas en las llamadas a subprocesos
-        o en la generación de archivos resultan en una salida de ruido aleatorio como
-        alternativa.
     """
 
     nLayer = (len(model) + 1) // 6

@@ -1,10 +1,3 @@
-"""
-Etapa 1 - Preprocesamiento del Campo de Ondas Real
-===================================================
-Lee archivos crudos de campo en formato SG2, aplica filtro pasabanda (0.1-30 Hz),
-remuestrea a la frecuencia objetivo y retorna un vector plano (N_TRACES * N_SAMPLES,).
-"""
-
 import numpy as np
 from obspy import read
 import glob
@@ -71,7 +64,7 @@ def detectar_n_trazas(archivos):
     """
     st_test = read(archivos[0])
     n_traces = len(st_test)
-    print(f"[INFO] Se detectaron dinámicamente {n_traces} trazas (geófonos) en los archivos .sg2")
+    print(f"[INFO] Se detectaron {n_traces} trazas (geófonos) en los archivos .sg2")
     return n_traces
 
 

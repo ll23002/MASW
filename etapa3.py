@@ -1,11 +1,3 @@
-"""
-Etapa 3 - Definición del Prior (Espacio de Búsqueda)
-=====================================================
-Define los límites físicos del espacio de búsqueda usando distribuciones uniformes
-para 5 capas (4 finitas + 1 semiespacio) y configura el objeto BEL1D.MODELSET
-integrando la función de forward de la Etapa 2.
-"""
-
 import sys, os
 import numpy as np
 from scipy import stats
@@ -15,7 +7,6 @@ if BEL1D_PATH not in sys.path:
     sys.path.insert(0, BEL1D_PATH)
 
 from pyBEL1D import BEL1D
-
 from config import DT, N_SAMPLES, N_TRACES
 from etapa2 import cps_forward_wavefield
 
