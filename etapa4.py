@@ -47,7 +47,7 @@ def calcular_rmse_y_mejor_modelo(Prebel, dataset_real):
             - mejor_forward_matrix (numpy.ndarray): Sismograma sintético del mejor
               modelo con forma (N_TRACES, N_SAMPLES).
     """
-    forward_matrix = Prebel.FORWARD  # shape: (n_models, N_TRACES * N_SAMPLES)
+    forward_matrix = Prebel.FORWARD
 
     rmse_vals = np.sqrt(np.mean((forward_matrix - dataset_real) ** 2, axis=1))
     idx_mejor = np.argmin(rmse_vals)
@@ -77,10 +77,8 @@ def correr_postbel_y_graficas(Prebel, dataset_real, archivo_label, idx, n_layer)
             - vs (numpy.ndarray): Velocidades Vs del modelo medio posterior (N_LAYER,).
             - h (numpy.ndarray): Espesores del modelo medio posterior (N_LAYER - 1,).
     """
-    from pyBEL1D import BEL1D
 
     print(f"\n[INFO] Procesando disparo: {archivo_label} ({idx+1})...")
-
     Postbel = BEL1D.POSTBEL(Prebel)
     Postbel.run(Dataset=dataset_real, nbSamples=500, NoiseModel=None)
 
