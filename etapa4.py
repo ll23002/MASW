@@ -79,6 +79,7 @@ def correr_postbel_y_graficas(Prebel, dataset_real, archivo_label, idx, n_layer)
     """
 
     print(f"\n[INFO] Procesando disparo: {archivo_label} ({idx+1})...")
+
     Postbel = BEL1D.POSTBEL(Prebel)
     Postbel.run(Dataset=dataset_real, nbSamples=500, NoiseModel=None)
 

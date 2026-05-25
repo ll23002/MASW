@@ -1,14 +1,3 @@
-"""
-Etapa 5 - Visualización: Wiggle Plots, Atenuación y Perfil 2D
-=============================================================
-Genera las visualizaciones finales del pipeline:
-  - Panel 1: Wiggle plot del campo de ondas real.
-  - Panel 2: Wiggle plot del mejor sismograma sintético (Etapa 4).
-  - Panel 3: Superposición elástico vs anelástico para evaluar atenuación.
-  - Perfil 2D de Vs a lo largo del tendido.
-"""
-
-import os
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -96,7 +85,7 @@ def wiggle_plot_comparativa(datos_reales, mejor_forward, mean_model, n_layer):
     fig_comp.tight_layout()
     fig_comp.savefig("wavefields_comparativa.png", dpi=150, facecolor=fig_comp.get_facecolor())
     plt.close(fig_comp)
-    print("-> Archivo 'wavefields_comparativa.png' guardado.")
+    print("Archivo 'wavefields_comparativa.png' guardado.")
 
     return fig_comp
 
